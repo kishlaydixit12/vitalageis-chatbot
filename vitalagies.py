@@ -3,7 +3,7 @@
 import os
 import streamlit as st
 from dotenv import load_dotenv
-from langchain_huggingface import HuggingFaceEmbeddings, HuggingFaceEndpoint
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain.chains import RetrievalQA
 from langchain_community.vectorstores import FAISS
 from langchain_core.prompts import PromptTemplate
@@ -11,10 +11,16 @@ from langchain_groq import ChatGroq
 from langchain_openai import ChatOpenAI
 from twilio.rest import Client
 
+# Voice libraries
+import speech_recognition as sr
+from gtts import gTTS
+import playsound
+import tempfile
+
 # -----------------------------
 # LOAD ENVIRONMENT VARIABLES
 # -----------------------------
-load_dotenv()  # Load .env file containing GROQ_API_KEY, OPENAI_API_KEY, TWILIO credentials, etc.
+load_dotenv()
 DB_FAISS_PATH = "vectorstore/db_faiss"
 
 TWILIO_ACCOUNT_SID = os.getenv("TWILIO_ACCOUNT_SID")
@@ -38,7 +44,49 @@ def send_sms(message):
         st.warning(f"⚠️ SMS not sent: {e}")
 
 # -----------------------------
-# FUNCTION: Load or Reload Vectorstore
+# FUNCTION: Text-to-Speech (Multilanguage)
+# -----------------------------
+lang_code_map = {
+    "English": "en", "Hindi": "hi", "Spanish": "es", "French": "fr",
+    "German": "de", "Bengali": "bn", "Tamil": "ta", "Telugu": "te",
+    "Gujarati": "gu", "Punjabi": "pa", "Urdu": "ur"
+}
+
+def speak_text(text, language="en"):
+    try:
+        tts = gTTS(text=text, lang=language)
+        with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as fp:
+            temp_file = fp.name
+        tts.save(temp_file)
+        playsound.playsound(temp_file)
+        os.remove(temp_file)
+    except Exception as e:
+        st.warning(f"⚠️ TTS Error: {e}")
+
+# -----------------------------
+# FUNCTION: Speech-to-Text
+# -----------------------------
+def listen_to_user():
+    recognizer = sr.Recognizer()
+    with sr.Microphone() as source:
+        st.info("🎙️ Listening...")
+        try:
+            audio = recognizer.listen(source, timeout=10, phrase_time_limit=15)
+            user_input = recognizer.recognize_google(audio)
+            st.success(f"🗣️ You said: {user_input}")
+            return user_input
+        except sr.WaitTimeoutError:
+            st.warning("⚠️ No speech detected. Please try again.")
+            return None
+        except sr.UnknownValueError:
+            st.warning("⚠️ Could not understand audio")
+            return None
+        except sr.RequestError as e:
+            st.warning(f"⚠️ STT service error: {e}")
+            return None
+
+# -----------------------------
+# FUNCTION: Load Vectorstore
 # -----------------------------
 @st.cache_resource
 def get_vectorstore():
@@ -52,9 +100,7 @@ def get_vectorstore():
     )
     return db
 
-
 def reload_vectorstore():
-    """Manually reload FAISS DB when new data is added"""
     embedding_model = HuggingFaceEmbeddings(
         model_name='sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2'
     )
@@ -67,7 +113,7 @@ def reload_vectorstore():
     st.success("✅ Data reloaded successfully!")
 
 # -----------------------------
-# PROMPT SETUP
+# FUNCTION: Prompt Template
 # -----------------------------
 def set_custom_prompt(custom_prompt_template):
     return PromptTemplate(template=custom_prompt_template, input_variables=["context", "question"])
@@ -76,7 +122,7 @@ def set_custom_prompt(custom_prompt_template):
 # MAIN APP
 # -----------------------------
 def main():
-    st.title("🧠 VITAL AEGIS ")
+    st.title("🧠 VITAL AEGIS")
 
     # Sidebar: model selection
     st.sidebar.header("⚙️ Model Settings")
@@ -88,18 +134,17 @@ def main():
     # Sidebar: language selection
     language_choice = st.sidebar.selectbox(
         "Select language",
-        ["English", "Hindi", "Spanish", "French", "German", "Bengali", "Tamil", "Telgu", "Gujarati", "Punjabi", "Urdu"]
+        ["English", "Hindi", "Spanish", "French", "German", "Bengali", "Tamil", "Telugu", "Gujarati", "Punjabi", "Urdu"]
     )
 
-    # Data Reload Button
+    # Reload FAISS DB
     if st.button("🔄 Reload Data"):
         with st.spinner("Reloading FAISS data..."):
             reload_vectorstore()
 
-    # Load vectorstore into session (only once)
+    # Load vectorstore into session
     if 'vectorstore' not in st.session_state:
         st.session_state['vectorstore'] = get_vectorstore()
-
     vectorstore = st.session_state['vectorstore']
 
     # Initialize chat history
@@ -110,14 +155,22 @@ def main():
     for message in st.session_state.messages:
         st.chat_message(message['role']).markdown(message['content'])
 
-    # Get user input
-    prompt = st.chat_input("💬 Ask Vital Aegis anything!")
+    # Voice input button
+    prompt = None
+    if st.button("🎤 Speak to Vital Aegis"):
+        voice_prompt = listen_to_user()
+        if voice_prompt:
+            prompt = voice_prompt
+
+    # Text input
+    if not prompt:
+        prompt = st.chat_input("💬 Ask Vital Aegis anything!")
 
     if prompt:
         st.chat_message('user').markdown(prompt)
         st.session_state.messages.append({'role': 'user', 'content': prompt})
 
-        # Multilanguage prompt
+        # Multilanguage prompt template
         CUSTOM_PROMPT_TEMPLATE = f"""
         Answer the user's question in {language_choice}.
         Use the pieces of information provided in the context to answer the user's question.
@@ -160,6 +213,9 @@ def main():
             # Display answer
             st.chat_message('assistant').markdown(result)
             st.session_state.messages.append({'role': 'assistant', 'content': result})
+
+            # Speak the answer in selected language
+            speak_text(result, language=lang_code_map[language_choice])
 
             # Send SMS alert
             sms_message = f"Chatbot Answer for your query '{prompt}': {result}"
